@@ -481,6 +481,19 @@ async function renderButton(p) {
  *  5. QUERY STRING -> RENDER OPTIONS
  * ================================================================== */
 
+function parseScale(q) {
+    // Canonical `scale`, with `resolution` / `res` as aliases so the
+    // client-side `data-resolution` attribute maps naturally.
+    // Accepts plain numbers ("2"), an "x" suffix ("2x"), or null -> default.
+    let raw = q.get('scale');
+    if (raw === null || raw === '') raw = q.get('resolution');
+    if (raw === null || raw === '') raw = q.get('res');
+    if (raw === null || raw === '') return DEFAULT_SCALE;
+    const s = String(raw).trim().toLowerCase().replace(/x$/, '');
+    const n = Number(s);
+    return Number.isFinite(n) ? n : DEFAULT_SCALE;
+}
+
 function parseButtonParams(searchParams) {
     const q = searchParams;
 
@@ -505,7 +518,9 @@ function parseButtonParams(searchParams) {
         state,
 
         // resolution: 1 = 1 image px per CSS px. Default is low-res.
-        scale: num('scale', DEFAULT_SCALE),
+        // Accepts `scale` (canonical) plus `resolution` / `res` aliases,
+        // with optional "x" suffix ("2x") for convenience.
+        scale: parseScale(q),
 
         // typography
         font: str('font', 'sans'),
