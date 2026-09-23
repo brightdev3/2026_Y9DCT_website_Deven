@@ -4,7 +4,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { Jimp, loadFont } = require('jimp');
+const { Jimp, loadFont, ResizeStrategy } = require('jimp');
 
 /* ================================================================== *
  *  Config
@@ -42,17 +42,26 @@ try {
     console.warn('[fonts] could not load "jimp/fonts":', err.message);
 }
 
-const BUILTIN_SIZES = [8, 16, 32, 64, 128];
-const BUILTIN_WEIGHTS = ['BLACK', 'WHITE'];
-
+// Discover every SANS_<size>_<weight> export instead of hard-coding a few.
+// (More native sizes -> smaller corrections -> sharper text.)
 const sansSizes = new Map();
-for (const size of BUILTIN_SIZES) {
-    const entry = {};
-    for (const weight of BUILTIN_WEIGHTS) {
-        const src = fontExports[`SANS_${size}_${weight}`];
-        if (src) entry[weight] = src;
+for (const [key, src] of Object.entries(fontExports)) {
+    const m = /^SANS_(\d+)_(BLACK|WHITE)$/.exec(key);
+    if (!m || !src) continue;
+    const size = Number(m[1]);
+    if (!sansSizes.has(size)) sansSizes.set(size, {});
+    sansSizes.get(size)[m[2]] = src;
+}
+// Fallback if discovery ever finds nothing (older jimp layout).
+if (!sansSizes.size) {
+    for (const size of [8, 16, 32, 64, 128]) {
+        const entry = {};
+        for (const weight of ['BLACK', 'WHITE']) {
+            const src = fontExports[`SANS_${size}_${weight}`];
+            if (src) entry[weight] = src;
+        }
+        if (Object.keys(entry).length) sansSizes.set(size, entry);
     }
-    if (Object.keys(entry).length) sansSizes.set(size, entry);
 }
 const AVAILABLE_SIZES = [...sansSizes.keys()].sort((a, b) => a - b);
 
@@ -91,6 +100,17 @@ async function resolveFont(family, requestedSize) {
     const key = `builtin:${snapped}`;
     if (!fontCache.has(key)) fontCache.set(key, await loadFont(entry.WHITE || entry.BLACK));
     return { font: fontCache.get(key), size: snapped };
+}
+
+// Closest native bitmap size to a wanted device-pixel size.
+function nearestNativeSize(wanted) {
+    let best = AVAILABLE_SIZES[0];
+    let bestD = Math.abs(best - wanted);
+    for (const s of AVAILABLE_SIZES) {
+        const d = Math.abs(s - wanted);
+        if (d < bestD - 1e-9) { bestD = d; best = s; }
+    }
+    return best;
 }
 
 /* ---- text metrics ------------------------------------------------- */
@@ -149,11 +169,14 @@ function fontLineHeight(font, fallback = 16) {
 /**
  * Pick a built-in font for the label.
  *
- * `targetPx` is the *device-pixel* size we want. We snap to the nearest
- * available size (so "make it bigger" actually makes it bigger), then
- * walk downward if the text doesn't fit inside maxW x maxH.
+ * All of `maxW` / `maxH` / `targetPx` must be in the SAME space (either all
+ * CSS px or all device px). The caller (renderButton) passes CSS px so the
+ * choice is resolution-independent: the same CSS size is picked no matter
+ * what `scale` is. The device-size mapping + resampling happens afterwards.
  *
- * Custom bitmap fonts are fixed-size and returned as-is.
+ * We snap to the nearest available size, then walk downward if the text
+ * doesn't fit inside maxW x maxH. Custom bitmap fonts are fixed-size and
+ * returned as-is.
  */
 async function autoFitFont(family, text, maxW, maxH, targetPx) {
     const fam = String(family || 'sans').toLowerCase();
@@ -442,37 +465,111 @@ async function renderButton(p) {
     );
     await canvas.composite(bodyLayer, 0, 0);
 
-    /* ---- 3. label ---- */
-    const innerPad = Math.max(2, Math.round(10 * scale));
-    const innerW = Math.max(4, width - innerPad * 2);
-    const innerH = Math.max(4, height - Math.round(8 * scale));
+    /* ---- 3. label (resolution-independent size) ----
+     *
+     * Why two stages? Bitmap fonts only exist at discrete native sizes, and
+     * their glyph proportions don't scale linearly. Picking directly in
+     * device pixels meant scale 0.5 could stay on a big font while scale 2
+     * dropped a size (or vice versa) -> text size fluctuated with resolution.
+     *
+     * Stage 1 (CSS px, no `scale` involved): pick the logical size S.
+     * Stage 2 (device px): render the nearest native font, then resample by
+     *   correction = wanted / native so the on-button CSS size is exactly S.
+     * Exact matches (the common 0.5x/1x/2x cases) skip resampling entirely.
+     */
+    const innerPadDev = Math.max(2, Math.round(10 * scale));
+    const innerWDev = Math.max(4, width - innerPadDev * 2);
+    const innerHDev = Math.max(4, height - Math.round(8 * scale));
 
-    const { font, size: resolvedSize } = await autoFitFont(
+    // Stage 1: stable choice in CSS-pixel space.
+    const innerWCss = Math.max(4, baseW - 20);
+    const innerHCss = Math.max(4, baseH - 8);
+    const { font: cssFont, size: cssSize } = await autoFitFont(
         p.font,
         p.text,
-        innerW,
-        innerH,
-        p.size * scale
+        innerWCss,
+        innerHCss,
+        p.size
     );
+    const isCustom = cssSize == null;
 
-    const lineHeight = fontLineHeight(font, resolvedSize || p.size);
-    const textWidth  = measureLine(font, p.text, resolvedSize || p.size);
+    // Stage 2: map to device pixels.
+    let printFont = cssFont;   // native font we actually rasterise with
+    let nativeW;               // its unscaled text metrics (device px at 1x)
+    let nativeH;
+    let correction;            // multiply native metrics -> exact device size
 
-    const tx = Math.round(btnX + (width - textWidth) / 2);
-    const ty = Math.round(btnY + (height - lineHeight) / 2);
-
-    // text drop shadow only makes sense at >= 1x; at low res it just muddies
-    if (!lowRes) {
-        const textShadow = new Jimp({ width: canvasW, height: canvasH, color: 0x00000000 });
-        await textShadow.print({ font, x: tx, y: ty + 1, text: p.text, maxWidth: innerW });
-        recolor(textShadow, [0, 0, 0], 0.35);
-        await canvas.composite(textShadow, 0, 0);
+    if (!isCustom) {
+        const wanted = cssSize * scale;
+        const nativeSize = nearestNativeSize(wanted);
+        if (nativeSize !== cssSize) {
+            ({ font: printFont } = await resolveFont(p.font, nativeSize));
+        }
+        nativeW = measureLine(printFont, p.text, nativeSize);
+        nativeH = fontLineHeight(printFont, nativeSize);
+        correction = nativeW > 0 && nativeH > 0 ? wanted / nativeSize : 1;
+    } else {
+        // Fixed-size custom font: its native pixels ARE the CSS size at 1x.
+        // Fit it inside the CSS box (stable), then scale to device pixels.
+        nativeW = measureLine(cssFont, p.text, 16);
+        nativeH = fontLineHeight(cssFont, 16);
+        let fit = 1;
+        if (nativeW > 0 && nativeH > 0) {
+            fit = Math.min(1, innerWCss / nativeW, innerHCss / nativeH);
+        }
+        correction = scale * fit;
     }
 
-    const textLayer = new Jimp({ width: canvasW, height: canvasH, color: 0x00000000 });
-    await textLayer.print({ font, x: tx, y: ty, text: p.text, maxWidth: innerW });
-    recolor(textLayer, p.fg);
-    await canvas.composite(textLayer, 0, 0);
+    if (!Number.isFinite(correction) || correction <= 0) correction = 1;
+    // Skip resampling for negligible (<2%) differences: keeps text crisp.
+    const needsResample = Math.abs(correction - 1) > 0.02;
+
+    const textWDev = Math.max(1, Math.round(nativeW * correction));
+    const textHDev = Math.max(1, Math.round(nativeH * correction));
+    const tx = Math.round(btnX + (width - textWDev) / 2);
+    const ty = Math.round(btnY + (height - textHDev) / 2);
+    const shadowOn = !lowRes;
+    const shadowDy = Math.max(1, Math.round(1 * scale));
+    const resampleMode = lowRes
+        ? ResizeStrategy.NEAREST_NEIGHBOR
+        : ResizeStrategy.BILINEAR;
+
+    // Helper: rasterise one text layer. When no resampling is needed we
+    // print straight onto a full-canvas layer (crisp fast path); otherwise
+    // we print tight and upscale/downscale to the exact device size.
+    async function rasteriseText(color, alphaMul, dx, dy) {
+        if (!needsResample) {
+            const layer = new Jimp({ width: canvasW, height: canvasH, color: 0x00000000 });
+            await layer.print({ font: printFont, x: tx + dx, y: ty + dy, text: p.text, maxWidth: innerWDev });
+            recolor(layer, color, alphaMul);
+            return layer;
+        }
+        const pad = 4;
+        const tight = new Jimp({
+            width: Math.max(1, Math.ceil(nativeW) + pad * 2),
+            height: Math.max(1, Math.ceil(nativeH) + pad * 2),
+            color: 0x00000000,
+        });
+        await tight.print({ font: printFont, x: pad, y: pad, text: p.text, maxWidth: Math.ceil(nativeW) + pad });
+        recolor(tight, color, alphaMul);
+        // Crop the padding back off proportionally after scaling.
+        const grownW = Math.max(1, Math.round(tight.bitmap.width * correction));
+        const grownH = Math.max(1, Math.round(tight.bitmap.height * correction));
+        await tight.resize({ w: grownW, h: grownH, mode: resampleMode });
+        const off = Math.round(pad * correction);
+        const cropped = tight.crop
+            ? await tight.crop({ x: off, y: off, w: textWDev, h: textHDev })
+            : tight; // older Jimp without .crop({}) — fall back to grown layer
+        const layer = new Jimp({ width: canvasW, height: canvasH, color: 0x00000000 });
+        await layer.composite(cropped, tx + dx, ty + dy);
+        return layer;
+    }
+
+    // text drop shadow only makes sense at >= 1x; at low res it just muddies
+    if (shadowOn) {
+        await canvas.composite(await rasteriseText([0, 0, 0], 0.35, 0, shadowDy), 0, 0);
+    }
+    await canvas.composite(await rasteriseText(p.fg, 1, 0, 0), 0, 0);
 
     return canvas;
 }
