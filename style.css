@@ -1,0 +1,88 @@
+body {
+    margin: 0;
+    font-family: Arial;
+    line-height: 1.6;
+}
+
+header {
+    background: #173b66;
+    color: white;
+    border-bottom: 4px solid #be303e;
+}
+
+.header-content {
+    padding: 16px 24px;
+}
+
+.site-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    color: white;
+    font-size: 22px;
+    text-decoration: none;
+}
+
+.site-logo {
+    width: 56px;
+    height: 56px;
+}
+
+nav {
+    margin-top: 10px;
+}
+
+.nav-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 24px;
+}
+
+.nav-links a {
+    color: white;
+    text-decoration: none;
+}
+
+main {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 25px;
+}
+
+h1, h2, h3 {
+    color: #173b66;
+    line-height: 1.25;
+}
+
+a {
+    color: #174f85;
+}
+
+img {
+    max-width: 100%;
+}
+
+.campus-image {
+    width: 100%;
+    max-width: 720px;
+}
+
+.cat-image {
+    width: 100%;
+    max-width: 500px;
+}
+
+.tiger-maths-video {
+    width: 100%;
+    max-width: 720px;
+}
+
+footer {
+    border-top: 1px solid #ddd;
+    padding: 18px 24px;
+    font-size: 14px;
+}
+
+footer p {
+    margin: auto;
+}
