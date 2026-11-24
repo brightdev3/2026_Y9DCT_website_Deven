@@ -43,6 +43,12 @@ nav {
     text-decoration: none;
 }
 
+.github-footer {
+    float: right;
+    margin-left: 12px;
+    color: #174f85;
+}
+
 main {
     max-width: 1000px;
     margin: 0 auto;
